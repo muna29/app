@@ -1,0 +1,151 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+
+    ext {
+        kotlin_version = '1.8.10'
+        spotless = '6.1.2'
+        anvil_version = '2.4.4'
+        gradle_plugin = '7.4.2' // When updating, also update lint_version
+        lint_version = '30.4.2' // This value must always be gradle_plugin + 23
+        min_sdk = 23
+        target_sdk = 33
+        compile_sdk = 33
+        fladle_version = '0.17.4'
+        kotlinter_version = '3.12.0'
+        dokka_version = '1.8.20'
+    }
+
+    repositories {
+        google()
+        mavenCentral()
+        maven { url "https://plugins.gradle.org/m2/" }
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:$gradle_plugin"
+        classpath "com.diffplug.spotless:spotless-plugin-gradle:$spotless"
+        classpath "com.squareup.anvil:gradle-plugin:$anvil_version"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+
+        // NOTE: Do not place your application dependencies here; they belong
+        // in the individual module build.gradle files
+    }
+}
+
+plugins {
+    id 'org.jetbrains.dokka' version "$dokka_version"
+    id 'com.osacky.fulladle' version "$fladle_version"
+    id 'org.jmailen.kotlinter' version "$kotlinter_version" apply false
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    configurations.all {
+        resolutionStrategy.force 'org.objenesis:objenesis:2.6'
+    }
+}
+
+subprojects {
+
+    if (project.name.endsWith("api")) {
+        apply plugin: 'org.jetbrains.dokka'
+    }
+
+    String[] allowAndroidTestsIn = ["app", "sync-lib", "httpsupgrade-impl"]
+    if (!allowAndroidTestsIn.contains(project.name)) {
+        project.projectDir.eachFile(groovy.io.FileType.DIRECTORIES) { File parent ->
+            if (parent.name == "src") {
+                parent.eachFile(groovy.io.FileType.DIRECTORIES) { child ->
+                    if (child.name == "androidTest") {
+                        throw new GradleException("Only the app module can have Android Tests. Perhaps you could use Robolectric?")
+                    }
+                }
+            }
+        }
+    }
+
+    String[] allowStringsIn = ["app"]
+    if (!allowStringsIn.contains(project.name)) {
+        project.projectDir.eachDirRecurse { File parent ->
+            if (parent.name == "values") {
+                parent.eachFile(groovy.io.FileType.FILES) { child ->
+                    if (child.name == "strings.xml") {
+                        throw new GradleException("Duplicate strings.xml file found in $project. " +
+                                "Only :app should contain the strings.xml file. " +
+                                "Rename file to strings-<feature>.xml instead.")
+                    }
+                }
+            }
+        }
+    }
+
+    def projectPath = path
+    configurations.configureEach {
+        if (name == "compileClasspath" || name.endsWith("CompileClasspath")) {
+            incoming.beforeResolve {
+                for (dependency in dependencies) {
+                    if (dependency instanceof ProjectDependency) {
+                        def dependencyPath = dependency.dependencyProject.path
+                        if (dependencyPath == projectPath) continue
+                        // internal modules have to use internalImplementation
+                        // when a non internal configuration is built (i.e. PlayDebug) no internal dependencies should be found
+                        if (dependencyPath.endsWith('internal') && !name.toLowerCase().contains("internal")) {
+                            throw new GradleException("Invalid dependency $projectPath -> $dependencyPath. " +
+                                    "'internal' modules must use internalImplementation")
+                        }
+                        // internal modules can depend on impl
+                        if (projectPath.endsWith('internal') && dependencyPath.endsWith('impl')) continue
+                        if (!projectPath.endsWith(":app") && dependencyPath.endsWith("impl")) {
+                            throw new GradleException("Invalid dependency $projectPath -> $dependencyPath. " +
+                                    "Only :app module can depend on 'impl' modules")
+                        }
+                        // API modules can depend on :feature-toggles-api
+                        if (projectPath.endsWith("api")
+                                && dependencyPath.endsWith("api")
+                                && dependencyPath != ":feature-toggles-api"
+                                && dependencyPath != ":navigation-api"
+                        ) {
+                            throw new GradleException("Invalid dependency $projectPath -> $dependencyPath. " +
+                                    "'api' modules can't depend on other 'api' modules")
+                        }
+                        if (dependencyPath.endsWith(":app")) {
+                            throw new GradleException("Invalid dependency $projectPath -> $dependencyPath. " +
+                                    "No other module can depend on ':app'")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
+
+fladle {
+    configs {
+        serviceAccountCredentials.set(project.layout.projectDirectory.file("flank.json"))
+        androidTests {
+            async.set(false)
+            flankVersion.set("21.+")
+            testShards.set(2)
+            useOrchestrator.set(false)
+            recordVideo.set(false)
+            testTargets.set([
+                    "notAnnotation com.duckduckgo.espresso.PrivacyTest",
+                    "notAnnotation com.duckduckgo.espresso.UserJourney",
+            ])
+            devices.set([
+                    ["model": "Pixel3", "version": "30"],
+                    ["model": "Nexus6", "version": "23"]
+            ])
+            localResultsDir.set("fladleResults")
+        }
+    }
+}
+
+apply plugin: 'android-reporting'
